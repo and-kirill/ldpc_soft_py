@@ -1,0 +1,9 @@
+__pycache__
+doc/*.aux
+doc/*.pdf
+doc/*.log
+*.o
+*.so
+.idea
+*alist
+*alist*
