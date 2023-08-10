@@ -12,7 +12,6 @@ Compile [doc.tex](doc.tex) for detailed explanation of LDPC Tanner graph impleme
 * Run [valgrind.sh](valgrind.sh) for memory check and profiling
 * Parity check matrix is represented in [alist](http://www.inference.org.uk/mackay/codes/alist.html) format.
 * To run simulations, please refer to [simulation](https://github.com/and-kirill/simulator_awgn_python) module
-## Comparison with a reference implementation
 
 ## Implementation notes
 There are two versions of ```logtanh``` function specified by ```FLOAT_LOGTANH``` macro.
