@@ -22,7 +22,6 @@ cTypes are used to execute decoder from python
 
 import ctypes
 import os
-from enum import Enum
 import numpy as np
 
 
@@ -103,6 +102,50 @@ class Alist:
         if length:
             np_arr = np.hstack([np_arr, np.array([0] * (length - len(np_arr)))])
         return ' '.join(map(str, np_arr.astype(np.uint).tolist()))
+
+
+def invert_permutation(perm_forward):
+    """
+    Construct the inverse permutation.
+    Note that matlab-like style of the inverse permutation p[idx]=p may not work for numpy
+    """
+    perm_reverse = np.empty(perm_forward.size, perm_forward.dtype)
+    perm_reverse[perm_forward] = np.arange(perm_forward.size)
+    return perm_reverse
+
+
+def generator_from_pcm(pcm_rdonly):
+    """
+    Construct the generator matrix from the parity check matrix
+    return: generator matrix (np.array, uint8) and information bits indices
+    """
+    pcm = pcm_rdonly.copy()  # Make a copy, row combinations will be performed
+    n_rows, n_cols = pcm.shape
+    col_ind = 0
+    row_ind = 0
+    eye_idx = []
+    while row_ind < n_rows:
+        # Find the first non-zero entry in column below <index> value
+        nz_idx = np.argwhere(pcm[row_ind:, col_ind] == 1).reshape(-1)
+        if len(nz_idx) == 0:
+            col_ind += 1
+            continue
+        # Swap rows
+        swap_ind = nz_idx[0] + row_ind
+        pcm[[row_ind, swap_ind], :] = pcm[[swap_ind, row_ind], :]
+
+        for i in np.argwhere(pcm[:, col_ind] == 1).reshape(-1):
+            if row_ind == i:
+                continue
+            pcm[i, :] = np.mod(pcm[i, :] + pcm[row_ind, :], 2)
+        eye_idx.append(col_ind)
+        row_ind += 1
+        col_ind = row_ind
+
+    pc_idx = np.setdiff1d(np.arange(n_cols), eye_idx)  # Parity check indices
+    all_idx = np.hstack([eye_idx, pc_idx])  # All indices (permuted)
+    gen_mtx = np.hstack([pcm.copy()[:, pc_idx].T, np.eye(n_cols - n_rows).astype(np.uint8)])
+    return gen_mtx[:, invert_permutation(all_idx)], all_idx[n_rows:]
 
 
 # C++ implementation: compilation, linking, and execution routines
