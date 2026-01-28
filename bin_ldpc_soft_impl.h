@@ -33,15 +33,19 @@
 #endif // ifdef OFFSETS_ENABLED
 
 /// Load Tanner graph from the alist file
-void* load_alist(const char   *filename,
-                 unsigned int& blocklength,
-                 unsigned int& n_checks);
+void* load_alist(const char *filename,
+                 uint32_t    blocklen,
+                 uint32_t    n_checks);
 
 
 template<typename TL, typename TI>
-bool check_syndrome(const TannerGraph<TI>& ldpc,
-                    const TL              *llr_out,
-                    bool                   is_azcw) {
+bool check_syndrome(const TannerGraph<TI>    & ldpc,
+                    const DecoderSettings<TL>& settings,
+                    const TL                  *llr_out) {
+  if (!settings.early_termination) {
+    return false;
+  }
+
   std::vector<uint8_t> llr_signs = std::vector<uint8_t>(ldpc.n, 0);
 
   for (TI vni = 0; vni < ldpc.n; vni++) {
@@ -51,14 +55,14 @@ bool check_syndrome(const TannerGraph<TI>& ldpc,
     }
     llr_signs[vni] = llr_out[vni] < 0;
 
-    if (is_azcw && llr_signs[vni]) {
+    if (settings.is_azcw && llr_signs[vni]) {
       // LLR < 0 is enough to fail the syndrome check if all-zero codeword
       return false;
     }
   }
 
   // All LLRs are positive, return true is all zero codeword assumed
-  if (is_azcw) {
+  if (settings.is_azcw) {
     return true;
   }
 
@@ -93,7 +97,7 @@ bool check_syndrome(const TannerGraph<TI>& ldpc,
    Each weight set is a vector of block length
  * The output message magnitudes from check to variable nodes
  * are scaled and offset
- * @param ldpc     Pointer to the Tanner graph structure
+ * @param tng       Pointer to the Tanner graph structure
  * @param settings  LDPC decoder settings:
  *        - The number of decoding iterations
  *        - Early termination (exit if syndrome is 0)
@@ -108,31 +112,30 @@ bool check_syndrome(const TannerGraph<TI>& ldpc,
  * @param llr_out is a raw buffer to keep output log-likelihood ratios
  */
 template<typename TL, typename TI>
-unsigned int ldpc_hl_noms(const TannerGraph<TI>  & ldpc,
-                          const DecParams<TL, TI>& settings,
-                          const TL                *llr_in,
-                          bool                     is_azcw,
-                          TL                      *llr_out) {
-  Matrix<TL> r_msg   = ldpc.template matrix_r<TL>(0);
+unsigned int ldpc_hl_noms(const TannerGraph<TI>    & tng,
+                          const DecoderSettings<TL>& settings,
+                          const TL                  *llr_in,
+                          TL                        *llr_out) {
+  Matrix<TL> r_msg   = tng.template matrix_r<TL>(0);
   const TL   max_val = std::numeric_limits<TL>::max();
 
   // Precompute pointers for faster access
-  const TI *row_weights = ldpc.row_weight.data();
+  const TI *row_weights = tng.row_weight.data();
 
   // Copy input - use memcpy for better vectorization
-  std::copy(llr_in, llr_in + ldpc.n, llr_out);
+  std::copy(llr_in, llr_in + tng.n, llr_out);
 
   for (unsigned int loop = 0; loop < settings.n_iterations; ++loop) {
-    if (settings.terminate_syndrome && check_syndrome(ldpc, llr_out, is_azcw)) {
+    if (check_syndrome(tng, settings, llr_out)) {
       return loop;
     }
 
-    for (TI j = 0; j < ldpc.m; j++) {
+    for (TI j = 0; j < tng.m; j++) {
       const TI row_weight_j = row_weights[j];
 
       // Get row pointers once
       TL *r_msg_row     = r_msg.row(j);
-      const TI *col_idx = ldpc.col_idx_matrix.row(j);
+      const TI *col_idx = tng.col_idx_matrix.row(j);
 
       TL  first_min  = max_val;
       TL  second_min = max_val;
@@ -166,11 +169,11 @@ unsigned int ldpc_hl_noms(const TannerGraph<TI>  & ldpc,
 
         // Use multiplication instead of conditional
 #ifdef OFFSETS_ENABLED
-        TL scale  = settings.scales[col_id];
-        TL offset = settings.offsets[col_id];
+        TL scale  = settings.scale_array[col_id];
+        TL offset = settings.offset_array[col_id];
         r_msg_row[k] = (1 - 2 * sign) * scale * OFFSET(min_val, offset);
 #else // ifdef OFFSETS_ENABLED
-        TL scale = settings.scales[0];
+        TL scale = settings.scale_array[0];
         r_msg_row[k] = (1 - 2 * sign) * scale * min_val;
 #endif // ifdef OFFSETS_ENABLED
 
@@ -184,33 +187,31 @@ unsigned int ldpc_hl_noms(const TannerGraph<TI>  & ldpc,
 
 // Vertically layered normalized offset min-sum
 template<typename TL, typename TI>
-unsigned int ldpc_vl_noms(const TannerGraph<TI>  & ldpc,
-                          const DecParams<TL, TI>& settings,
-                          const TL                *llr_in,
-                          bool                     is_azcw,
-                          TL                      *llr_out) {
-  Matrix<TL> r_msg = ldpc.template matrix_r<TL>(0);
-
-  const TL max_val = std::numeric_limits<TL>::max();
+unsigned int ldpc_vl_noms(const TannerGraph<TI>    & tng,
+                          const DecoderSettings<TL>& settings,
+                          const TL                  *llr_in,
+                          TL                        *llr_out) {
+  Matrix<TL> r_msg   = tng.template matrix_r<TL>(0);
+  const TL   max_val = std::numeric_limits<TL>::max();
 
   // Precompute pointers for faster access
-  const TI *row_weights = ldpc.row_weight.data();
-  const TI *col_weights = ldpc.col_weight.data();
+  const TI *row_weights = tng.row_weight.data();
+  const TI *col_weights = tng.col_weight.data();
 
-  for (TI i = 0; i < ldpc.n; i++) {
+  for (TI i = 0; i < tng.n; i++) {
     llr_out[i] = llr_in[i];
   }
 
   for (unsigned int loop = 0; loop < settings.n_iterations; ++loop) {
     // Start with the syndrome checking
-    if (settings.terminate_syndrome && check_syndrome(ldpc, llr_out, is_azcw)) {
+    if (check_syndrome(tng, settings, llr_out)) {
       return loop;
     }
 
     // Start with a loop over variable nodes
-    for (TI vni = 0; vni < ldpc.n; vni++) {
+    for (TI vni = 0; vni < tng.n; vni++) {
       TL  acc_change = 0;
-      TI *col_idx_vn = ldpc.row_idx_matrix.row(vni);
+      TI *col_idx_vn = tng.row_idx_matrix.row(vni);
 
       // For each variable node (VN), process all check nodes connected to it
       for (TI i = 0; i < col_weights[vni]; i++) {
@@ -223,7 +224,7 @@ unsigned int ldpc_vl_noms(const TannerGraph<TI>  & ldpc,
         int sum_sign = 0;
 
         // Get row pointers once
-        const TI *col_idx = ldpc.col_idx_matrix.row(cni);
+        const TI *col_idx = tng.col_idx_matrix.row(cni);
         TL *r_msg_row     = r_msg.row(cni);
 
         for (TI k = 0; k < row_weights[cni]; k++) {
@@ -243,13 +244,13 @@ unsigned int ldpc_vl_noms(const TannerGraph<TI>  & ldpc,
           sum_sign ^= q_msg < 0;
         }
 #ifdef OFFSETS_ENABLED
-        TI coef_index = ldpc.col_idx_matrix.row(cni)[vn_chosen];
-        TL scale      = settings.scales[coef_index];
-        TL offset     = settings.offsets[coef_index];
+        TI coef_index = tng.col_idx_matrix.row(cni)[vn_chosen];
+        TL scale      = settings.scale_array[coef_index];
+        TL offset     = settings.offset_array[coef_index];
         TL update     = (1 - 2 * sum_sign) * scale *
                         OFFSET(min_val, offset);
 #else // ifdef OFFSETS_ENABLED
-        TL scale  = settings.scales[0];
+        TL scale  = settings.scale_array[0];
         TL update = (1 - 2 * sum_sign) * scale * min_val;
 #endif // ifdef OFFSETS_ENABLED
         acc_change          += update - r_msg_row[vn_chosen];
@@ -269,7 +270,7 @@ unsigned int ldpc_vl_noms(const TannerGraph<TI>  & ldpc,
  *  - update R-messages: from check to variable nodes
  *  - Update Q-messages: from variable to check nodes
  *  - Update output LLRs.
- * @param ldpc     Pointer to the Tanner graph structure
+ * @param tng     Pointer to the Tanner graph structure
  * @param llr_in vector of channel log likelihood ratios
  * @param n_iter  The number of decoding iterations
  * @param scales multiplicative scales
@@ -277,11 +278,10 @@ unsigned int ldpc_vl_noms(const TannerGraph<TI>  & ldpc,
  * @param llr_out is a raw buffer to keep output log-likelihood ratios
  */
 template<typename TL, typename TI>
-unsigned int ldpc_noms(const TannerGraph<TI>  & ldpc,
-                       const DecParams<TL, TI>& settings,
-                       const TL                *llr_in,
-                       bool                     is_azcw,
-                       TL                      *llr_out) {
+unsigned int ldpc_noms(const TannerGraph<TI>    & tng,
+                       const DecoderSettings<TL>& settings,
+                       const TL                  *llr_in,
+                       TL                        *llr_out) {
 #if 0
 
   // Unlikely case, needed just to match old implementation output
@@ -293,31 +293,31 @@ unsigned int ldpc_noms(const TannerGraph<TI>  & ldpc,
 
   // Auxiliary matrices
   // messages from check to variable
-  Matrix<TL> r_msg = ldpc.template matrix_r<TL> ();
+  Matrix<TL> r_msg = tng.template matrix_r<TL> ();
 
   // messages from variable to check
-  Matrix<TL> q_msg = ldpc.template matrix_r<TL> ();
+  Matrix<TL> q_msg = tng.template matrix_r<TL> ();
 
   const TL max_val = std::numeric_limits<TL>::max();
 
   // Precompute pointers for faster access
-  const TI *row_weights = ldpc.row_weight.data();
+  const TI *row_weights = tng.row_weight.data();
 
   TL *r_buf         = r_msg.buf();
   TL *q_buf         = q_msg.buf();
-  const TI *col_idx = ldpc.col_idx_matrix.buf();
+  const TI *col_idx = tng.col_idx_matrix.buf();
 
   // Initialization
-  for (unsigned int j = 0; j < ldpc.nzc; j++) {
+  for (unsigned int j = 0; j < tng.nzc; j++) {
     TI col_id = col_idx[j];
     q_buf[j] = llr_in[col_id];
   }
 
   for (TI loop = 0; loop < settings.n_iterations; ++loop) {
-    std::copy(llr_in, llr_in + ldpc.n, llr_out);
+    std::copy(llr_in, llr_in + tng.n, llr_out);
 
     // Update R messages
-    for (TI j = 0; j < ldpc.m; j++) {
+    for (TI j = 0; j < tng.m; j++) {
       const TI row_weight_j = row_weights[j];
       TL  first_min         = max_val;
       TL  second_min        = max_val;
@@ -327,7 +327,7 @@ unsigned int ldpc_noms(const TannerGraph<TI>  & ldpc,
       // Get row pointers once
       TL *r_msg_row     = r_msg.row(j);
       TL *q_msg_row     = q_msg.row(j);
-      const TI *col_idx = ldpc.col_idx_matrix.row(j);
+      const TI *col_idx = tng.col_idx_matrix.row(j);
 
       for (TI k = 0; k < row_weight_j; k++) {
         TL abs_q_msg = std::abs(q_msg_row[k]);
@@ -349,11 +349,11 @@ unsigned int ldpc_noms(const TannerGraph<TI>  & ldpc,
         const TL min_val = (k == min_index) ? second_min : first_min;
 #ifdef OFFSETS_ENABLED
         const TI col_id = col_idx[k];
-        TL scale        = settings.scales[col_id];
-        TL offset       = settings.offsets[col_id];
+        TL scale        = settings.scale_array[col_id];
+        TL offset       = settings.offset_array[col_id];
         r_msg_row[k] = (1 - 2 * sign) * scale * OFFSET(min_val, offset);
 #else // ifdef OFFSETS_ENABLED
-        TL scale = settings.scales[0];
+        TL scale = settings.scale_array[0];
         r_msg_row[k] = (1 - 2 * sign) * scale * min_val;
 #endif // ifdef OFFSETS_ENABLED
       }
@@ -366,12 +366,12 @@ unsigned int ldpc_noms(const TannerGraph<TI>  & ldpc,
     }
 
     // Early stop if the syndrome is OK
-    if (settings.terminate_syndrome && check_syndrome(ldpc, llr_out, is_azcw)) {
+    if (check_syndrome(tng, settings, llr_out)) {
       return loop + 1;
     }
 
     // Update Q-messages
-    for (unsigned int j = 0; j < ldpc.nzc; j++) {
+    for (unsigned int j = 0; j < tng.nzc; j++) {
       TI col_id = col_idx[j];
       q_buf[j] = llr_out[col_id] - r_buf[j];
     }
@@ -414,49 +414,39 @@ static TL logtanh(TL x) {
  * @param llr_out is a raw buffer to keep output log-likelihood ratios
  */
 template<typename TL, typename TI>
-unsigned int ldpc_sp(const TannerGraph<TI>  & ldpc,
-                     const DecParams<TL, TI>& settings,
-                     const TL                *llr_in,
-                     bool                     is_azcw,
-                     TL                      *llr_out) {
-#if 0
-
-  // Unlikely case, needed just to match old implementation output
-  if (settings.terminate_syndrome && check_syndrome(ldpc, llr_in, is_azcw)) {
-    std::copy(llr_in, llr_in + ldpc.n, llr_out);
-    return 0;
-  }
-#endif // if 0
-
+unsigned int ldpc_sp(const TannerGraph<TI>    & tng,
+                     const DecoderSettings<TL>& settings,
+                     const TL                  *llr_in,
+                     TL                        *llr_out) {
   // Messages from check to variable nodes
-  Matrix<TL> r_msg = ldpc.template matrix_r<TL> ();
+  Matrix<TL> r_msg = tng.template matrix_r<TL> ();
 
   // Messages from variable to check nodes: signs and log-magnitudes are stored
   // separately. Note that log-magnitudes are required to avoid products of
   // hyperbolic tangents
-  Matrix<TL> q_ltanh      = ldpc.template matrix_r<TL> ();
-  Matrix<uint8_t> q_signs = ldpc.template matrix_r<uint8_t> ();
+  Matrix<TL> q_ltanh      = tng.template matrix_r<TL> ();
+  Matrix<uint8_t> q_signs = tng.template matrix_r<uint8_t> ();
 
   // Precompute pointers for faster access
-  const TI *row_weights = ldpc.row_weight.data();
+  const TI *row_weights = tng.row_weight.data();
 
   TL *r_buf             = r_msg.buf();
   TL *q_ltanh_buf       = q_ltanh.buf();
   uint8_t  *q_signs_buf = q_signs.buf();
-  const TI *col_idx     = ldpc.col_idx_matrix.buf();
+  const TI *col_idx     = tng.col_idx_matrix.buf();
 
   // Initialize input LLRs in the form of logtanh(|x|), sign(x)
   // Initialize: Compute
-  std::vector<TL> llr_in_log      = std::vector<TL>(ldpc.n, 0);
-  std::vector<uint8_t> llr_in_sgn = std::vector<uint8_t>(ldpc.n, 0);
+  std::vector<TL> llr_in_log      = std::vector<TL>(tng.n, 0);
+  std::vector<uint8_t> llr_in_sgn = std::vector<uint8_t>(tng.n, 0);
 
-  for (TI i = 0; i < ldpc.n; i++) {
+  for (TI i = 0; i < tng.n; i++) {
     llr_in_log[i] = logtanh<TL>(std::abs(llr_in[i]));
     llr_in_sgn[i] = llr_in[i] < 0;
   }
 
   // Initialize: Propagate
-  for (unsigned int j = 0; j < ldpc.nzc; j++) {
+  for (unsigned int j = 0; j < tng.nzc; j++) {
     TI col_id = col_idx[j];
     q_signs_buf[j] = llr_in_sgn[col_id];
     q_ltanh_buf[j] = llr_in_log[col_id];
@@ -464,11 +454,11 @@ unsigned int ldpc_sp(const TannerGraph<TI>  & ldpc,
 
   // Decoding iterations
   for (unsigned int loop = 0; loop < settings.n_iterations; ++loop) {
-    std::copy(llr_in, llr_in + ldpc.n, llr_out);
+    std::copy(llr_in, llr_in + tng.n, llr_out);
 
     // Update R messages
 
-    for (TI j = 0; j < ldpc.m; j++) {
+    for (TI j = 0; j < tng.m; j++) {
       const TI row_weight_j = row_weights[j];
       TL sum_ltanh          = 0;
       uint8_t sum_sign      = 0;
@@ -477,10 +467,10 @@ unsigned int ldpc_sp(const TannerGraph<TI>  & ldpc,
       TL *r_msg_row         = r_msg.row(j);
       TL *q_ltanh_row       = q_ltanh.row(j);
       uint8_t  *q_signs_row = q_signs.row(j);
-      const TI *col_idx     = ldpc.col_idx_matrix.row(j);
+      const TI *col_idx     = tng.col_idx_matrix.row(j);
 
       // Calculate R-message updates
-      for (TI k = 0; k < ldpc.row_weight[j]; k++) {
+      for (TI k = 0; k < tng.row_weight[j]; k++) {
         sum_ltanh += q_ltanh_row[k];
         sum_sign  ^= q_signs_row[k];
       }
@@ -497,12 +487,12 @@ unsigned int ldpc_sp(const TannerGraph<TI>  & ldpc,
     } // Loop over check nodes
 
     // Early stop if the syndrome is OK
-    if (settings.terminate_syndrome && check_syndrome(ldpc, llr_out, is_azcw)) {
+    if (check_syndrome(tng, settings, llr_out)) {
       return loop + 1;
     }
 
     // Update Q messages
-    for (unsigned int j = 0; j < ldpc.nzc; j++) {
+    for (unsigned int j = 0; j < tng.nzc; j++) {
       TI col_id = col_idx[j];
       TL val    = llr_out[col_id] - r_buf[j];
       q_signs_buf[j] = val < 0;
@@ -520,35 +510,35 @@ unsigned int ldpc_sp(const TannerGraph<TI>  & ldpc,
 
 // Normalized offset horizontally layered min-sum
 template<typename TL, typename TI>
-unsigned int gldpc_hl_noms(const TannerGraph<TI>  & ldpc,
-                           const DecParams<TL, TI>& settings,
-                           const TL                *llr_in,
-                           TL                      *llr_out) {
+unsigned int gldpc_hl_noms(const TannerGraph<TI>    & tng,
+                           const DecoderSettings<TL>& settings,
+                           const TL                  *llr_in,
+                           TL                        *llr_out) {
   static const TI N_GROPUS = 3; // Cordaro-Wagner: three groups of nodes
   // Messages from check to variable nodes
-  Matrix<TL> r_msg   = ldpc.template matrix_r<TL>(0);
+  Matrix<TL> r_msg   = tng.template matrix_r<TL>(0);
   const TL   max_val = std::numeric_limits<TL>::max();
 
   // Precompute pointers for faster access
-  const TI *row_weights = ldpc.row_weight.data();
+  const TI *row_weights = tng.row_weight.data();
 
   // Copy input - use memcpy for better vectorization
-  std::copy(llr_in, llr_in + ldpc.n, llr_out);
+  std::copy(llr_in, llr_in + tng.n, llr_out);
 
   // Decoding iterations
   for (unsigned int loop = 0; loop < settings.n_iterations; ++loop) {
     // NOTE: Check syndrome works only under all-zero codeword assumption
-    if (settings.terminate_syndrome && check_syndrome(ldpc, llr_out, true)) {
+    if (check_syndrome(tng, settings, llr_out)) {
       return loop;
     }
 
     // Update R messages
-    for (TI j = 0; j < ldpc.m; j++) {
+    for (TI j = 0; j < tng.m; j++) {
       const TI row_weight_j = row_weights[j];
 
       // Get row pointers once
       TL *r_msg_row     = r_msg.row(j);
-      const TI *col_idx = ldpc.col_idx_matrix.row(j);
+      const TI *col_idx = tng.col_idx_matrix.row(j);
 
       std::vector<TL> first_min(N_GROPUS, max_val);
       std::vector<TL> second_min(N_GROPUS, max_val);
@@ -597,12 +587,12 @@ unsigned int gldpc_hl_noms(const TannerGraph<TI>  & ldpc,
         TL update = std::max<TL>(llr_BC + llr_A, 0) -
                     std::max<TL>(llr_BC, llr_A);
 #ifdef OFFSETS_ENABLED
-        TL scale  = settings.scales[col_id];
-        TL offset = settings.offsets[col_id];
+        TL scale  = settings.scale_array[col_id];
+        TL offset = settings.offset_array[col_id];
         r_msg_row[k] = scale * SIGN(update) *
                        OFFSET(std::abs(update), offset);
 #else // ifdef OFFSETS_ENABLED
-        TL scale = settings.scales[0];
+        TL scale = settings.scale_array[0];
         r_msg_row[k] = scale * update;
 #endif // ifdef OFFSETS_ENABLED
         llr_out[col_id] = q_msg + r_msg_row[k];
@@ -625,25 +615,25 @@ std::pair<TL, int>gldpc_sp_cnop(TL log_x, int sign_x, TL log_y, int sign_y) {
  * !EXPERIMENTAL
  * Sum-product GLDPC decoder. GLDPC are based on Cordaro-Wagner codes,
  * as previously specified NMS.
- * @param ldpc     Pointer to the Tanner graph structure
+ * @param tng     Pointer to the Tanner graph structure
  * @param llr_in vector of channel log likelihood ratios
  * @param n_iter  The number of decoding iterations
  * @param llr_out is a raw buffer to keep output log-likelihood ratios
  */
 template<typename TL, typename TI>
-unsigned int gldpc_sp(const TannerGraph<TI>  & ldpc,
-                      const DecParams<TL, TI>& settings,
-                      const TL                *llr_in,
-                      TL                      *llr_out) {
+unsigned int gldpc_sp(const TannerGraph<TI>    & tng,
+                      const DecoderSettings<TL>& settings,
+                      const TL                  *llr_in,
+                      TL                        *llr_out) {
   static const TI N_GROPUS = 3; // Cordaro-Wagner: three groups of nodes
   // Messages from check to variable nodes
-  Matrix<TL> r_msg = ldpc.template matrix_r<TL> ();
+  Matrix<TL> r_msg = tng.template matrix_r<TL> ();
 
   // Messages from variable to check nodes: signs and log-magnitudes are stored
   // separately. Note that log-magnitudes are required to avoid products of
   // hyperbolic tangents
-  Matrix<TL> q_ltanh      = ldpc.template matrix_r<TL> ();
-  Matrix<uint8_t> q_signs = ldpc.template matrix_r<uint8_t> ();
+  Matrix<TL> q_ltanh      = tng.template matrix_r<TL> ();
+  Matrix<uint8_t> q_signs = tng.template matrix_r<uint8_t> ();
 
   std::vector<TL> sum_ltanh(N_GROPUS, 0);
   std::vector<uint8_t> sum_sign(N_GROPUS, 0);
@@ -651,20 +641,20 @@ unsigned int gldpc_sp(const TannerGraph<TI>  & ldpc,
   TL *r_buf             = r_msg.buf();
   TL *q_ltanh_buf       = q_ltanh.buf();
   uint8_t  *q_signs_buf = q_signs.buf();
-  const TI *col_idx     = ldpc.col_idx_matrix.buf();
+  const TI *col_idx     = tng.col_idx_matrix.buf();
 
   // Initialize input LLRs in the form of logtanh(|x|), sign(x)
   // Initialize: Compute
-  std::vector<TL> llr_in_log      = std::vector<TL>(ldpc.n, 0);
-  std::vector<uint8_t> llr_in_sgn = std::vector<uint8_t>(ldpc.n, 0);
+  std::vector<TL> llr_in_log      = std::vector<TL>(tng.n, 0);
+  std::vector<uint8_t> llr_in_sgn = std::vector<uint8_t>(tng.n, 0);
 
-  for (TI i = 0; i < ldpc.n; i++) {
+  for (TI i = 0; i < tng.n; i++) {
     llr_in_log[i] = logtanh<TL>(std::abs(llr_in[i]));
     llr_in_sgn[i] = llr_in[i] < 0;
   }
 
   // Initialize: Propagate
-  for (unsigned int j = 0; j < ldpc.nzc; j++) {
+  for (unsigned int j = 0; j < tng.nzc; j++) {
     TI col_id = col_idx[j];
     q_signs_buf[j] = llr_in_sgn[col_id];
     q_ltanh_buf[j] = llr_in_log[col_id];
@@ -672,10 +662,10 @@ unsigned int gldpc_sp(const TannerGraph<TI>  & ldpc,
 
   // Decoding iterations
   for (unsigned int loop = 0; loop < settings.n_iterations; ++loop) {
-    std::copy(llr_in, llr_in + ldpc.n, llr_out);
+    std::copy(llr_in, llr_in + tng.n, llr_out);
 
     // Update R messages
-    for (TI j = 0; j < ldpc.m; j++) {
+    for (TI j = 0; j < tng.m; j++) {
       for (TI i = 0; i < N_GROPUS; i++ ) {
         sum_ltanh[i] = 0;
         sum_sign[i]  = 0;
@@ -685,12 +675,12 @@ unsigned int gldpc_sp(const TannerGraph<TI>  & ldpc,
       TL *r_msg_row         = r_msg.row(j);
       TL *q_ltanh_row       = q_ltanh.row(j);
       uint8_t  *q_signs_row = q_signs.row(j);
-      const TI *col_idx     = ldpc.col_idx_matrix.row(j);
+      const TI *col_idx     = tng.col_idx_matrix.row(j);
 
       // LLR sign sums must be equal in all three groups
       std::vector<int> pc_signs(N_GROPUS, 0);
 
-      for (TI k = 0; k < ldpc.row_weight[j]; k++) {
+      for (TI k = 0; k < tng.row_weight[j]; k++) {
         TI group = k % N_GROPUS;
 
         sum_ltanh[group] += q_ltanh_row[k];
@@ -710,7 +700,7 @@ unsigned int gldpc_sp(const TannerGraph<TI>  & ldpc,
         sum_sign_og[i]  = og_term.second;
       }
 
-      for (TI k = 0; k < ldpc.row_weight[j]; k++) {
+      for (TI k = 0; k < tng.row_weight[j]; k++) {
         TI group = k % N_GROPUS;
 
         // Write an update properly here!
@@ -727,12 +717,12 @@ unsigned int gldpc_sp(const TannerGraph<TI>  & ldpc,
 
     // Early stop if the syndrome is OK
     // NOTE: Check syndrome works only under all-zero codeword assumption
-    if (settings.terminate_syndrome && check_syndrome(ldpc, llr_out, true)) {
+    if (check_syndrome(tng, settings, llr_out)) {
       return loop + 1;
     }
 
     // Update Q messages
-    for (unsigned int j = 0; j < ldpc.nzc; j++) {
+    for (unsigned int j = 0; j < tng.nzc; j++) {
       TI col_id = col_idx[j];
       TL val    = llr_out[col_id] - r_buf[j];
       q_signs_buf[j] = val < 0;
@@ -740,6 +730,54 @@ unsigned int gldpc_sp(const TannerGraph<TI>  & ldpc,
     }
   } // Loop over decoding iterations
   return settings.n_iterations;
+}
+
+// Output bit error rate estimation
+#ifdef OUTPUT_SANITY_CHECK
+template<typename TL>
+void llr_sanity_check(const DecoderSettings<TL>& settings,
+                      const TL                  *llr_out) {
+  // Check NaN and infinite values
+  for (unsigned int i = 0; i < settings.block_length; i++) {
+    if (std::isinf(llr_out[i]) || std::isnan(llr_out[i])) {
+      std::cerr << "Infinite or NaN values detected in the decoder output.";
+      std::cerr << std::endl;
+      return;
+    }
+  }
+}
+
+#endif // ifdef OUTPUT_SANITY_CHECK
+
+template<typename TL>
+double output_ber(const DecoderSettings<TL>& settings,
+                  const TL                  *llr_out,
+                  const uint8_t             *tx_bits,
+                  unsigned int               got_iter) {
+#ifdef OUTPUT_SANITY_CHECK
+  llr_sanity_check(settings, llr_out);
+#endif // ifdef OUTPUT_SANITY_CHECK
+
+  if (settings.is_azcw && (got_iter < settings.n_iterations)) {
+    // For all-zero codeword, early convergence means no error
+    // Check the remaining part of the codeword
+    return 0.0;
+  }
+
+  // Define limits
+  unsigned int limit = settings.block_length;
+
+  if (settings.is_systematic) {
+    limit = settings.get_inf_bits_count();
+  }
+
+  unsigned int be_cum = 0;
+
+  for (unsigned int i = 0; i < limit; i++) {
+    // Zero LLR meas no convergence
+    be_cum += (llr_out[i] == 0) || ((llr_out[i] < 0) != tx_bits[i]);
+  }
+  return double(be_cum) / double(limit);
 }
 
 #endif  // DECODER_H_

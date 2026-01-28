@@ -35,10 +35,11 @@ class Matrix {
 public:
 
   /**
-   * Initialize matrix with the number of rows, columns
+   * Initialize sparse matrix with the number of rows, columns
    * Specify a default value to fill all elements with
    * @param nrows The number of rows in the matrix
-   * @param ncols The number of columns in the matrix
+   * @param nz    The number of nonzero in the matrix
+   * @param row_offsets Row weightx (cumulative)
    */
   Matrix(unsigned int                     nrows,
          unsigned int                     nz,

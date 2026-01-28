@@ -18,88 +18,50 @@
 
 #ifndef LDPC_SETTINGS_H_
 #define LDPC_SETTINGS_H_
-#include <vector>
 #include <cstdint>
 
-template<typename T_OUT, typename T_IN>
-std::vector<T_OUT>convert_vector(T_IN *vals, unsigned int length) {
-  std::vector<T_OUT> converted = std::vector<T_OUT>(length);
-
-  for (unsigned int i = 0; i < length; i++) {
-    converted[i] = (T_OUT)vals[i];
-  }
-  return converted;
-}
-
-template<typename TL, typename TI>
-struct DecParams {
-  // Minimal config: includes the number of iterations, early termination
-  // criterion. Used by sum-product settings
-  DecParams(unsigned int n_iterations, bool terminate_syndrome) :
-    n_iterations(n_iterations),
-    terminate_syndrome(terminate_syndrome)
-  {};
-
-  // Min-sum config that includes offsets and scales
-  DecParams(unsigned int n_iterations, bool terminate_syndrome,
-            std::vector<TL>scales, std::vector<TL>offsets) :
-    n_iterations(n_iterations),
-    terminate_syndrome(terminate_syndrome),
-    scales(scales),
-    offsets(offsets),
-    row_sequence(std::vector<TI>(offsets.size()))
-  {
-    for (TI i = 0; i < offsets.size(); i++) {
-      row_sequence[i] = i;
-    }
-  };
-
-  // Layered min-sum config with custom row sequence
-  DecParams(unsigned int n_iterations, bool terminate_syndrome,
-            std::vector<TL>scales, std::vector<TL>offsets,
-            std::vector<TI>row_sequence) :
-    n_iterations(n_iterations),
-    terminate_syndrome(terminate_syndrome),
-    scales(scales),
-    offsets(offsets),
-    row_sequence(row_sequence)
-  {};
-
-  unsigned int   n_iterations;
-  bool           terminate_syndrome;
-  std::vector<TL>scales;
-  std::vector<TL>offsets;
-  std::vector<TI>row_sequence;
-};
 
 template<typename TL>
-void* params_factory(unsigned int  blocklen,
-                     unsigned int  n_checks,
-                     bool          syndrome_termintion,
-                     unsigned int  n_iterations,
-                     unsigned int *row_sequence,
-                     double       *scales_array,
-                     double       *offset_array) {
-  if (blocklen > std::numeric_limits<uint16_t>::max()) {
-    convert_vector<TL, double>(            scales_array, blocklen);
-    convert_vector<TL, double>(            offset_array, blocklen);
-    convert_vector<uint32_t, unsigned int>(row_sequence, n_checks);
-    return new DecParams<TL, uint32_t>(
-      n_iterations,
-      syndrome_termintion,
-      convert_vector<TL, double>(            scales_array, blocklen),
-      convert_vector<TL, double>(            offset_array, blocklen),
-      convert_vector<uint32_t, unsigned int>(row_sequence, n_checks)
-      );
-  } else {
-    return new DecParams<TL, uint16_t>(
-      n_iterations,
-      syndrome_termintion,
-      convert_vector<TL, double>(            scales_array, blocklen),
-      convert_vector<TL, double>(            offset_array, blocklen),
-      convert_vector<uint16_t, unsigned int>(row_sequence, n_checks)
-      );
-  }
-}
+struct DecoderSettings {
+  /// Block length, required to define array boundaries
+  uint32_t block_length;
+
+  /// The number of parity checks, required to define array boundaries
+  uint32_t n_checks;
+
+  /**
+   * If true, the code is systematic, information bits are the first k bits.
+   * In this case, the bit error rate is evaluated using the first k bits
+   *  */
+  bool is_systematic;
+
+  // Flag indicating early termination (syndrome convergence)
+  bool early_termination;
+
+  /**
+   * Flag indicating that the simulations assume AZCW' assumption
+   * 'AZCW: all-zeros codeword */
+
+  bool is_azcw;
+
+  // Maximum number of decoding iterations
+  uint32_t n_iterations;
+
+  /**
+   * Per-column scale array (for min-sum).
+   * By default, only the first number is used,
+   * and the scale is shared between all variable nodes (columns).
+   * To use full-support, compile with -DOFFSETS_ENABLED flag.
+   */
+  TL *scale_array;
+
+  /// Per-column offset array (used with -DOFFSETS_ENABLED only)
+  TL *offset_array;
+
+  unsigned int get_inf_bits_count() const {
+    return block_length - n_checks;
+  };
+};
+
 
 #endif // ifndef LDPC_SETTINGS_H_

@@ -34,7 +34,7 @@ std::vector<unsigned int>read_line(std::ifstream& fp,
   std::string line;
 
   if (!std::getline(fp, line)) {
-    std::cout << "File corrupted. Failed at " << action << ". Exiting." <<
+    std::cerr << "File corrupted. Failed at " << action << ". Exiting." <<
       std::endl;
     return std::vector<unsigned int>();
   }
@@ -47,7 +47,7 @@ std::vector<unsigned int>read_line(std::ifstream& fp,
   }
 
   if (line_vec.size() != expected_len) {
-    std::cout << "Line length mismatch at " << action << "." << std::endl;
+    std::cerr << "Line length mismatch at " << action << "." << std::endl;
     return std::vector<unsigned int>();
   }
   return line_vec;
@@ -102,7 +102,7 @@ void* fill_alist(unsigned int   n,
   return tng;
 }
 
-void* load_alist(const char *filename, unsigned int& n, unsigned int& m) {
+void* load_alist(const char *filename, uint32_t n, uint32_t m) {
   std::ifstream fp(filename);
 
   if (fp.fail()) {
@@ -112,8 +112,14 @@ void* load_alist(const char *filename, unsigned int& n, unsigned int& m) {
   std::vector<unsigned int> data = read_line(fp, 2, "reading matrix size");
 
   if (!data.size()) return 0;
-  n = data[0];
-  m = data[1];
+
+  if (n != data[0]) {
+    std::cerr << "Column count differs from expected value" << std::endl;
+  }
+
+  if (m != data[1]) {
+    std::cerr << "Row count differs from expected value" << std::endl;
+  }
 
   // Start type split at this point!
   if (n < std::numeric_limits<uint16_t>::max()) {

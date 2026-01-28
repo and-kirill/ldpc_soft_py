@@ -22,10 +22,6 @@
 #include "./bin_ldpc_soft_impl.h"
 #include "./bin_ldpc_soft_settings.h"
 
-// Specify LLR type constants
-#define LLR_TYPE_FLOAT64 0
-#define LLR_TYPE_FLOAT32 1
-
 // Specify LDPC decoding commands:
 #define DECODE_LDPC_SPA      0 // Sum-product
 #define DECODE_LDPC_NOMS     2 // Normalized offset min-sum (NOMS)
@@ -37,96 +33,28 @@
 #define DECODE_GLDPC_SPA     6 // Sum-product
 
 
-void* init_ldpc_settings(unsigned int blocklen,
-                         unsigned int n_checks,
-                         unsigned int llr_type,
-                         bool
-                         syndrome_termintion,
-                         unsigned int  n_iterations,
-                         unsigned int *row_sequence,
-                         double       *scale_array,
-                         double       *offset_array) {
-  switch (llr_type) {
-    case LLR_TYPE_FLOAT64:
-      return params_factory<double>(blocklen,
-                                    n_checks,
-                                    syndrome_termintion,
-                                    n_iterations,
-                                    row_sequence,
-                                    scale_array,
-                                    offset_array);
-    case LLR_TYPE_FLOAT32:
-      return params_factory<float>(blocklen,
-                                   n_checks,
-                                   syndrome_termintion,
-                                   n_iterations,
-                                   row_sequence,
-                                   scale_array,
-                                   offset_array);
-    default:
-      return reinterpret_cast<void *>(0);
-  }
-}
-
 /// Structure to be returned to python via ctypes
+template<typename TL>
 struct Decoder {
-  Decoder(char         *alist_path,
-          unsigned int  llr_type,
-          bool          syndrome_termintion,
-          unsigned int  n_iterations,
-          unsigned int *row_sequence,
-          double       *scales_array,
-          double       *offset_array) :
-    llr_type(llr_type) {
-    tng = load_alist(alist_path, blocklength, n_checks);
-
-    ldpc_settings = init_ldpc_settings(blocklength,
-                                       n_checks,
-                                       llr_type,
-                                       syndrome_termintion,
-                                       n_iterations,
-                                       row_sequence,
-                                       scales_array,
-                                       offset_array);
+  Decoder(const char *alist_path, const DecoderSettings<TL> *settings) :
+    settings(settings)
+  {
+    tng = load_alist(alist_path, settings->block_length, settings->n_checks);
   }
 
   ~Decoder() {
-    if (blocklength < std::numeric_limits<uint16_t>::max()) {
+    if (settings->block_length < std::numeric_limits<uint16_t>::max()) {
       delete static_cast<TannerGraph<uint16_t> *>(tng);
-
-      switch (llr_type) {
-        case LLR_TYPE_FLOAT64:
-          delete static_cast<DecParams<double, uint16_t> *>(ldpc_settings);
-          break;
-        case LLR_TYPE_FLOAT32:
-          delete static_cast<DecParams<float, uint16_t> *>(ldpc_settings);
-          break;
-      }
     } else {
       delete static_cast<TannerGraph<uint32_t> *>(tng);
-
-      switch (llr_type) {
-        case LLR_TYPE_FLOAT64:
-          delete static_cast<DecParams<double, uint32_t> *>(ldpc_settings);
-          break;
-        case LLR_TYPE_FLOAT32:
-          delete static_cast<DecParams<float, uint32_t> *>(ldpc_settings);
-          break;
-      }
     }
+
+    // LDPC settings are provided externally, do not remove the underlying
+    // arrays (initialized by numpy)
   }
 
-  /// LLR types (specified above)
-  unsigned int llr_type;
-
-  /// Block length. uint16_t indexing is used when block length allows this
-  unsigned int blocklength;
-
-  /// The number of parity checks
-  unsigned int n_checks;
-
-  /// Pointer to LDPC settings
-  void *ldpc_settings;
+  /// Decoder settings
+  const DecoderSettings<TL> *settings;
 
   /// Pointer to Tanner graph representation
   void *tng;
@@ -141,30 +69,28 @@ void warn_gldpc(bool is_azcw) {
 }
 
 template<typename TL, typename TI>
-unsigned int do_decode_soft(unsigned int command,
-                            void        *ldpc_ptr,
-                            TL          *llr_in,
-                            bool         is_azcw,
-                            TL          *llr_out) {
-  Decoder *ldpc               = static_cast<Decoder *>(ldpc_ptr);
-  TannerGraph<TI>   *tng      = static_cast<TannerGraph<TI> *>(ldpc->tng);
-  DecParams<TL, TI> *settings =
-    static_cast<DecParams<TL, TI> *>(ldpc->ldpc_settings);
+unsigned int do_decode_soft(unsigned int       command,
+                            const Decoder<TL> *ldpc_ptr,
+                            TL                *llr_in,
+                            TL                *llr_out) {
+  TannerGraph<TI> *tng =
+    static_cast<TannerGraph<TI> *>(ldpc_ptr->tng);
+  const DecoderSettings<TL> *settings = ldpc_ptr->settings;
 
   switch (command) {
     case DECODE_LDPC_SPA:
-      return ldpc_sp<TL, TI>(*tng, *settings, llr_in, is_azcw, llr_out);
+      return ldpc_sp<TL, TI>(*tng, *settings, llr_in, llr_out);
     case DECODE_LDPC_NOMS:
-      return ldpc_noms<TL, TI>(*tng, *settings, llr_in, is_azcw, llr_out);
+      return ldpc_noms<TL, TI>(*tng, *settings, llr_in, llr_out);
     case DECODE_LDPC_NOMS_HL:
-      return ldpc_hl_noms<TL, TI>(*tng, *settings, llr_in, is_azcw, llr_out);
+      return ldpc_hl_noms<TL, TI>(*tng, *settings, llr_in, llr_out);
     case DECODE_LDPC_NOMS_VL:
-      return ldpc_vl_noms<TL, TI>(*tng, *settings, llr_in, is_azcw, llr_out);
+      return ldpc_vl_noms<TL, TI>(*tng, *settings, llr_in, llr_out);
     case DECODE_GLDPC_NOMS_HL:
-      warn_gldpc(is_azcw);
+      warn_gldpc(settings->is_azcw);
       return gldpc_hl_noms<TL, TI>(*tng, *settings, llr_in, llr_out);
     case DECODE_GLDPC_SPA:
-      warn_gldpc(is_azcw);
+      warn_gldpc(settings->is_azcw);
       return gldpc_sp<TL, TI>(*tng, *settings, llr_in, llr_out);
   }
   std::cerr << "WARNING: Unknown decoding command: " << command << std::endl;
@@ -172,64 +98,73 @@ unsigned int do_decode_soft(unsigned int command,
 }
 
 template<typename TL>
-unsigned int decode_soft(unsigned int command,
-                         void        *ldpc_ptr,
-                         TL          *llr_in,
-                         bool         is_azcw,
-                         TL          *llr_out) {
-  Decoder *ldpc = static_cast<Decoder *>(ldpc_ptr);
-
-  if (ldpc->blocklength > std::numeric_limits<uint16_t>::max()) {
-    return do_decode_soft<TL, uint32_t>(command,
-                                        ldpc_ptr,
-                                        llr_in,
-                                        is_azcw,
-                                        llr_out);
+unsigned int decode_soft(unsigned int       command,
+                         const Decoder<TL> *ldpc_ptr,
+                         TL                *llr_in,
+                         TL                *llr_out) {
+  if (ldpc_ptr->settings->block_length > std::numeric_limits<uint16_t>::max()) {
+    return do_decode_soft<TL, uint32_t>(command, ldpc_ptr, llr_in, llr_out);
   } else {
-    return do_decode_soft<TL, uint16_t>(command,
-                                        ldpc_ptr,
-                                        llr_in,
-                                        is_azcw,
-                                        llr_out);
+    return do_decode_soft<TL, uint16_t>(command, ldpc_ptr, llr_in, llr_out);
   }
 }
 
+// float32 external API
 extern "C"
-void* init_ldpc(char         *alist_path,
-                unsigned int  llr_type,
-                bool          syndrome_termintion,
-                unsigned int  n_iterations,
-                unsigned int *row_sequence,
-                double       *scales_array,
-                double       *offset_array) {
-  return new Decoder(alist_path,
-                     llr_type,
-                     syndrome_termintion,
-                     n_iterations,
-                     row_sequence,
-                     scales_array,
-                     offset_array);
+void* init_ldpc_float32(const char                   *alist_path,
+                        const DecoderSettings<float> *settings) {
+  return new Decoder<float>(alist_path, settings);
 }
 
 extern "C"
-void free_ldpc(void *ldpc_ptr) {
-  delete (static_cast<Decoder *>(ldpc_ptr));
+void free_ldpc_float32(void *ldpc_ptr) {
+  delete (static_cast<Decoder<float> *>(ldpc_ptr));
 }
 
 extern "C"
 unsigned int decode_siso_float32(unsigned int command,
-                                 void        *ldpc_ptr,
+                                 void        *ldpc_void_p,
                                  float       *llr_in,
-                                 bool         is_azcw,
                                  float       *llr_out) {
-  return decode_soft<float>(command, ldpc_ptr, llr_in, is_azcw, llr_out);
+  Decoder<float> *ldpc_ptr = static_cast<Decoder<float> *>(ldpc_void_p);
+
+  return decode_soft<float>(command, ldpc_ptr, llr_in, llr_out);
+}
+
+extern "C"
+double output_ber_float32(const DecoderSettings<float> *settings,
+                          const float                  *llr_out,
+                          const uint8_t                *tx_bits,
+                          unsigned int                  got_iter) {
+  return output_ber<float>(*settings, llr_out, tx_bits, got_iter);
+}
+
+// float64 external API
+extern "C"
+void* init_ldpc_float64(char                          *alist_path,
+                        const DecoderSettings<double> *settings) {
+  return new Decoder<double>(alist_path, settings);
+}
+
+extern "C"
+void free_ldpc_float64(void *ldpc_ptr) {
+  delete (static_cast<Decoder<double> *>(ldpc_ptr));
 }
 
 extern "C"
 unsigned int decode_siso_float64(unsigned int command,
-                                 void        *ldpc_ptr,
+                                 void        *ldpc_void_p,
                                  double      *llr_in,
-                                 bool         is_azcw,
                                  double      *llr_out) {
-  return decode_soft<double>(command, ldpc_ptr, llr_in, is_azcw, llr_out);
+  Decoder<double> *ldpc_ptr = static_cast<Decoder<double> *>(ldpc_void_p);
+
+  return decode_soft<double>(command, ldpc_ptr, llr_in, llr_out);
+}
+
+extern "C"
+double output_ber_float64(const DecoderSettings<double> *settings,
+                          const double                  *llr_out,
+                          const uint8_t                 *tx_bits,
+                          unsigned int                   got_iter) {
+  return output_ber<double>(*settings, llr_out, tx_bits, got_iter);
 }
